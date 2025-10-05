@@ -1,1 +1,81 @@
+#!/bin/bash
 
+# Ensure the script is run as root
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root. Use: sudo ./server_hardening_rhel.sh"
+    exit 1
+fi
+
+# Create a log file
+LOG_FILE="xyz.txt"
+touch "$LOG_FILE"
+
+# Update and upgrade system silently
+echo "Updating and upgrading system silently..."
+dnf -y update >> "$LOG_FILE" 2>&1
+
+# Install OpenSSH server if not installed
+if ! rpm -q openssh-server >/dev/null; then
+    echo "Installing OpenSSH server..."
+    dnf -y install openssh-server >> "$LOG_FILE" 2>&1
+fi
+
+# Start and enable SSH service
+echo "Enabling and starting SSH service..."
+systemctl enable sshd
+systemctl start sshd
+
+# Define SSH config file path
+SSH_CONFIG="/etc/ssh/sshd_config"
+
+# Change SSH port from 22 to 50489
+if grep -q "^#Port 22" "$SSH_CONFIG"; then
+    echo "Updating SSH port..."
+    sed -i 's/^#Port 22/Port 50489/' "$SSH_CONFIG"
+elif ! grep -q "^Port 50489" "$SSH_CONFIG"; then
+    echo "Adding SSH port configuration..."
+    echo "Port 50489" >> "$SSH_CONFIG"
+fi
+
+# Disable root login for security (optional)
+if ! grep -q "^PermitRootLogin no" "$SSH_CONFIG"; then
+    echo "Disabling root SSH login..."
+    echo "PermitRootLogin no" >> "$SSH_CONFIG"
+fi
+
+# Apply SELinux rules to allow SSH on port 50489
+if command -v semanage >/dev/null 2>&1; then
+    echo "Applying SELinux rules for SSH..."
+    semanage port -a -t ssh_port_t -p tcp 50489 2>/dev/null || semanage port -m -t ssh_port_t -p tcp 50489
+    restorecon -v "$SSH_CONFIG"
+fi
+
+# Validate SSH configuration before restarting
+sshd -t
+if [[ $? -ne 0 ]]; then
+    echo "Error in SSH configuration! Not restarting SSH to prevent lockout."
+    exit 1
+fi
+
+# Restart SSH service
+echo "Restarting SSH service..."
+systemctl restart sshd
+
+# Configure firewall using firewalld
+echo "Configuring firewall..."
+if systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --add-port=50489/tcp
+    firewall-cmd --reload
+else
+    echo "Firewalld is not running. Enabling now..."
+    systemctl enable firewalld
+    systemctl start firewalld
+    firewall-cmd --permanent --add-port=50489/tcp
+    firewall-cmd --reload
+fi
+
+# Prompt user to change their password
+echo "For security, please set a new password for the current user."
+passwd
+
+echo "Server hardening for RHEL-based systems completed successfully!"
